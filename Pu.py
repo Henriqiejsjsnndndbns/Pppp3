@@ -1,34 +1,14 @@
-import os
-import sys
+from flask import Flask, render_template_string, request
+from flask_socketio import SocketIO
+from pynput.mouse import Controller, Button
 import socket
-import random
 
-# =========================
-# AUTO INSTALL (SEGURADO)
-# =========================
-try:
-    from flask import Flask, render_template_string, request
-    from flask_socketio import SocketIO, emit
-    from pynput.mouse import Controller, Button
-except:
-    print("📦 Instalando dependências...")
-    os.system("pip install flask flask-socketio pynput")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-# =========================
-# APP
-# =========================
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 mouse = Controller()
-
-PASSWORD = str(random.randint(1000, 9999))
 clients = set()
 
-# =========================
-# IP LOCAL
-# =========================
 def get_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect(("8.8.8.8", 80))
@@ -36,9 +16,6 @@ def get_ip():
     s.close()
     return ip
 
-# =========================
-# FRONTEND SIMPLES
-# =========================
 @app.route("/")
 def home():
     ip = get_ip()
@@ -46,41 +23,39 @@ def home():
     return render_template_string(f"""
     <html>
     <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Mouse Remote</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Remote Mouse</title>
 
         <style>
             body {{
                 margin:0;
                 background:black;
-                color:#00ff88;
-                font-family:monospace;
-                display:flex;
-                flex-direction:column;
-                justify-content:center;
-                align-items:center;
                 height:100vh;
+                display:flex;
             }}
 
-            #btn {{
-                width:220px;
-                height:220px;
-                border-radius:50%;
+            button {{
+                width:100%;
+                height:100vh;
+                background:#000;
+                color:#00ff88;
+                font-size:40px;
                 border:none;
-                background:#00ff88;
-                font-size:20px;
-                font-weight:bold;
+                font-family:monospace;
             }}
 
-            #btn:active {{
-                transform:scale(0.95);
+            button:active {{
+                background:#00ff88;
+                color:black;
             }}
 
             #info {{
                 position:absolute;
                 top:10px;
+                left:10px;
+                color:#00ff88;
                 font-size:12px;
-                opacity:0.8;
+                font-family:monospace;
             }}
         </style>
     </head>
@@ -88,29 +63,20 @@ def home():
     <body>
 
         <div id="info">
-            IP: {ip}:5000 | SENHA: {PASSWORD}
+            {ip}:5000
         </div>
 
-        <button id="btn">TOQUE</button>
+        <button id="btn">TOCAR</button>
 
         <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
         <script>
             const socket = io();
-            let last = 0;
 
-            socket.emit("auth", {{password:"{PASSWORD}"}});
+            socket.emit("auth", {{"password":"1234"}});
 
             document.getElementById("btn").onclick = () => {{
-                let now = Date.now();
-
-                if(now - last < 300) {{
-                    socket.emit("click");
-                }} else {{
-                    socket.emit("move", {{x: 25, y: 0}});
-                }}
-
-                last = now;
+                socket.emit("click");
             }};
         </script>
 
@@ -118,38 +84,15 @@ def home():
     </html>
     """)
 
-# =========================
-# AUTH
-# =========================
 @socketio.on("auth")
 def auth(data):
-    if data.get("password") == PASSWORD:
-        clients.add(request.sid)
-        emit("ok")
+    clients.add(request.sid)
 
-# =========================
-# MOVE
-# =========================
-@socketio.on("move")
-def move(data):
-    if request.sid in clients:
-        mouse.move(float(data.get("x", 0)), float(data.get("y", 0)))
-
-# =========================
-# CLICK
-# =========================
 @socketio.on("click")
 def click():
     if request.sid in clients:
         mouse.click(Button.left, 1)
 
-# =========================
-# START
-# =========================
 if __name__ == "__main__":
-    ip = get_ip()
-    print("\n🚀 SERVIDOR INICIADO")
-    print(f"🌐 Abra no celular: http://{ip}:5000")
-    print(f"🔐 Senha: {PASSWORD}\n")
-
+    print("Servidor rodando em http://0.0.0.0:5000")
     socketio.run(app, host="0.0.0.0", port=5000)
