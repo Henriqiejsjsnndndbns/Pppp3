@@ -1,0 +1,1148 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <IRsend.h>
+#include <IRutils.h>
+
+// ======================================================
+// WIFI
+// ======================================================
+
+const char* WIFI_SSID = "INFORNET_MARIANA";
+const char* WIFI_PASSWORD = "anamaria";
+
+// ======================================================
+// GPIO
+// ======================================================
+
+const uint16_t IR_RECEIVER_PIN = 4;
+const uint16_t IR_TRANSMITTER_PIN = 5;
+
+const uint8_t LED_RED = 6;
+const uint8_t LED_BLUE = 7;
+
+// ======================================================
+// OBJETOS
+// ======================================================
+
+WebServer server(80);
+
+IRrecv irrecv(IR_RECEIVER_PIN);
+IRsend irsend(IR_TRANSMITTER_PIN);
+
+decode_results results;
+
+// ======================================================
+// ESTADO
+// ======================================================
+
+String systemStatus = "INICIANDO";
+String wifiStatus = "CONECTANDO";
+String irStatus = "AGUARDANDO";
+String txStatus = "PARADO";
+
+String lastProtocol = "-";
+String lastCode = "-";
+
+uint16_t lastBits = 0;
+
+bool signalStored = false;
+bool repeatMode = false;
+
+unsigned long lastReceive = 0;
+unsigned long lastTx = 0;
+unsigned long bluePulse = 0;
+
+uint16_t lastRaw[400];
+uint16_t lastRawLength = 0;
+
+// ======================================================
+// LEDS
+// ======================================================
+
+void ledsNormal()
+{
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_BLUE, HIGH);
+}
+
+void ledsError()
+{
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_BLUE, LOW);
+}
+
+void ledsReceive()
+{
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_BLUE, LOW);
+
+    delay(80);
+
+    digitalWrite(LED_BLUE, HIGH);
+}
+
+void ledsStartup()
+{
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_BLUE, LOW);
+
+    delay(300);
+
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_BLUE, HIGH);
+}
+
+// ======================================================
+// HTML
+// ======================================================
+
+const char PAGE[] PROGMEM = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html lang="pt-BR">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
+
+<title>ESP32-S3 IR CONTROL</title>
+
+<style>
+
+body{
+    margin:0;
+    background:#080808;
+    color:#fff;
+    font-family:Arial,sans-serif;
+}
+
+.container{
+    max-width:900px;
+    margin:auto;
+    padding:20px;
+}
+
+h1{
+    margin-bottom:5px;
+}
+
+.subtitle{
+    color:#999;
+    margin-bottom:20px;
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:
+        repeat(auto-fit,minmax(220px,1fr));
+    gap:12px;
+}
+
+.card{
+    background:#151515;
+    border:1px solid #303030;
+    border-radius:15px;
+    padding:18px;
+}
+
+.sensor{
+    display:flex;
+    align-items:center;
+    gap:15px;
+}
+
+.indicator{
+    width:20px;
+    height:20px;
+    border-radius:50%;
+    background:#444;
+    box-shadow:0 0 10px #000;
+}
+
+.ok{
+    background:#00d66b;
+    box-shadow:0 0 15px #00d66b;
+}
+
+.wait{
+    background:#228cff;
+    box-shadow:0 0 15px #228cff;
+}
+
+.error{
+    background:#ff3030;
+    box-shadow:0 0 15px #ff3030;
+}
+
+.off{
+    background:#555;
+}
+
+.title{
+    font-size:18px;
+}
+
+.value{
+    margin-top:6px;
+    color:#aaa;
+}
+
+.big{
+    font-size:25px;
+    color:#fff;
+    word-break:break-all;
+}
+
+button{
+    width:100%;
+    padding:15px;
+    margin-top:10px;
+    border:0;
+    border-radius:10px;
+    font-size:16px;
+}
+
+.start{
+    background:#075cbd;
+    color:#fff;
+}
+
+.stop{
+    background:#9b1717;
+    color:#fff;
+}
+
+pre{
+    white-space:pre-wrap;
+    background:#050505;
+    padding:15px;
+    border-radius:10px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>ESP32-S3 IR CONTROL</h1>
+
+<div class="subtitle">
+Monitor de controle infravermelho
+</div>
+
+<div class="grid">
+
+<div class="card">
+<div class="sensor">
+<div id="wifiLed" class="indicator"></div>
+<div>
+<div class="title">Wi-Fi</div>
+<div id="wifi" class="value">CONECTANDO</div>
+</div>
+</div>
+</div>
+
+<div class="card">
+<div class="sensor">
+<div id="irLed" class="indicator"></div>
+<div>
+<div class="title">Receptor IR</div>
+<div id="ir" class="value">AGUARDANDO</div>
+</div>
+</div>
+</div>
+
+<div class="card">
+<div class="sensor">
+<div id="txLed" class="indicator"></div>
+<div>
+<div class="title">Transmissor IR</div>
+<div id="tx" class="value">PARADO</div>
+</div>
+</div>
+</div>
+
+<div class="card">
+<div class="sensor">
+<div id="sysLed" class="indicator"></div>
+<div>
+<div class="title">Sistema</div>
+<div id="system" class="value">INICIANDO</div>
+</div>
+</div>
+</div>
+
+</div>
+
+<div class="card" style="margin-top:15px">
+
+<div class="title">
+Último comando recebido
+</div>
+
+<div id="event" class="big">
+Nenhum
+</div>
+
+</div>
+
+<div class="grid" style="margin-top:15px">
+
+<div class="card">
+
+<div class="title">
+Protocolo
+</div>
+
+<div id="protocol" class="big">
+-
+</div>
+
+</div>
+
+<div class="card">
+
+<div class="title">
+Código
+</div>
+
+<div id="code" class="big">
+-
+</div>
+
+</div>
+
+<div class="card">
+
+<div class="title">
+Bits
+</div>
+
+<div id="bits" class="big">
+-
+</div>
+
+</div>
+
+</div>
+
+<div class="card" style="margin-top:15px">
+
+<div class="title">
+Transmissão contínua
+</div>
+
+<button class="start"
+        onclick="startTX()">
+
+INICIAR
+
+</button>
+
+<button class="stop"
+        onclick="stopTX()">
+
+PARAR
+
+</button>
+
+</div>
+
+<div class="card" style="margin-top:15px">
+
+<div class="title">
+Diagnóstico
+
+</div>
+
+<pre id="debug">
+Aguardando...
+</pre>
+
+</div>
+
+</div>
+
+<script>
+
+async function updateStatus(){
+
+    try{
+
+        const r =
+            await fetch('/api/status');
+
+        const d =
+            await r.json();
+
+        document.getElementById("wifi")
+            .textContent = d.wifi;
+
+        document.getElementById("ir")
+            .textContent = d.ir;
+
+        document.getElementById("tx")
+            .textContent = d.tx;
+
+        document.getElementById("system")
+            .textContent = d.system;
+
+        document.getElementById("event")
+            .textContent = d.event;
+
+        document.getElementById("protocol")
+            .textContent = d.protocol;
+
+        document.getElementById("code")
+            .textContent = d.code;
+
+        document.getElementById("bits")
+            .textContent = d.bits;
+
+        document.getElementById("debug")
+            .textContent = d.debug;
+
+        setLED(
+            "wifiLed",
+            d.wifi
+        );
+
+        setLED(
+            "irLed",
+            d.ir
+        );
+
+        setLED(
+            "txLed",
+            d.tx
+        );
+
+        setLED(
+            "sysLed",
+            d.system
+        );
+
+    }catch(e){
+
+        console.log(e);
+
+    }
+
+}
+
+function setLED(id,status){
+
+    const el =
+        document.getElementById(id);
+
+    el.className = "indicator";
+
+    status = status.toUpperCase();
+
+    if(
+        status.includes("CONECTADO") ||
+        status.includes("PRONTO") ||
+        status.includes("RECEBIDO")
+    ){
+
+        el.classList.add("ok");
+
+    }
+
+    else if(
+        status.includes("AGUARDANDO")
+    ){
+
+        el.classList.add("wait");
+
+    }
+
+    else if(
+        status.includes("ERRO") ||
+        status.includes("DESCONECTADO")
+    ){
+
+        el.classList.add("error");
+
+    }
+
+    else{
+
+        el.classList.add("off");
+
+    }
+
+}
+
+async function startTX(){
+
+    await fetch('/api/repeat/start');
+
+    updateStatus();
+
+}
+
+async function stopTX(){
+
+    await fetch('/api/repeat/stop');
+
+    updateStatus();
+
+}
+
+setInterval(
+    updateStatus,
+    500
+);
+
+updateStatus();
+
+</script>
+
+</body>
+
+</html>
+
+)rawliteral";
+
+// ======================================================
+// STATUS JSON
+// ======================================================
+
+void sendStatus()
+{
+
+    String debug;
+
+    debug += "ESP32-S3\n";
+
+    debug += "Wi-Fi: ";
+    debug += wifiStatus;
+    debug += "\n";
+
+    debug += "Receptor IR GPIO: ";
+    debug += String(IR_RECEIVER_PIN);
+    debug += "\n";
+
+    debug += "Transmissor IR GPIO: ";
+    debug += String(IR_TRANSMITTER_PIN);
+    debug += "\n";
+
+    debug += "LED vermelho GPIO: ";
+    debug += String(LED_RED);
+    debug += "\n";
+
+    debug += "LED azul GPIO: ";
+    debug += String(LED_BLUE);
+    debug += "\n";
+
+    debug += "Sinal armazenado: ";
+    debug += signalStored ? "SIM" : "NAO";
+    debug += "\n";
+
+    debug += "Modo repeticao: ";
+    debug += repeatMode ? "ATIVO" : "PARADO";
+
+    String json = "{";
+
+    json += "\"wifi\":\"";
+    json += wifiStatus;
+    json += "\",";
+
+    json += "\"ir\":\"";
+    json += irStatus;
+    json += "\",";
+
+    json += "\"tx\":\"";
+    json += txStatus;
+    json += "\",";
+
+    json += "\"system\":\"";
+    json += systemStatus;
+    json += "\",";
+
+    json += "\"event\":\"";
+
+    if(signalStored)
+        json += "Sinal IR recebido";
+    else
+        json += "Aguardando controle";
+
+    json += "\",";
+
+    json += "\"protocol\":\"";
+    json += lastProtocol;
+    json += "\",";
+
+    json += "\"code\":\"";
+    json += lastCode;
+    json += "\",";
+
+    json += "\"bits\":";
+    json += String(lastBits);
+    json += ",";
+
+    json += "\"debug\":\"";
+
+    for(size_t i=0;i<debug.length();i++)
+    {
+
+        char c = debug[i];
+
+        if(c == '\n')
+            json += "\\n";
+
+        else if(c == '"')
+            json += "\\\"";
+
+        else
+            json += c;
+
+    }
+
+    json += "\"";
+
+    json += "}";
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ======================================================
+// RECEBER IR
+// ======================================================
+
+void receiveIR()
+{
+
+    if(!irrecv.decode(&results))
+        return;
+
+    signalStored = true;
+
+    lastReceive = millis();
+
+    lastProtocol =
+        typeToString(
+            results.decode_type,
+            results.repeat
+        );
+
+    lastCode =
+        resultToHexidecimal(&results);
+
+    lastBits =
+        results.bits;
+
+    irStatus =
+        "SINAL RECEBIDO";
+
+    Serial.println();
+    Serial.println(
+        "================================="
+    );
+
+    Serial.println(
+        ">>> SINAL IR RECEBIDO <<<"
+    );
+
+    Serial.print(
+        "PROTOCOLO: "
+    );
+
+    Serial.println(
+        lastProtocol
+    );
+
+    Serial.print(
+        "CODIGO: "
+    );
+
+    Serial.println(
+        lastCode
+    );
+
+    Serial.print(
+        "BITS: "
+    );
+
+    Serial.println(
+        lastBits
+    );
+
+    Serial.print(
+        "RAW: "
+    );
+
+    Serial.println(
+        results.rawlen
+    );
+
+    Serial.println(
+        "SINAL ARMAZENADO."
+    );
+
+    Serial.println(
+        "================================="
+    );
+
+    uint16_t* raw =
+        resultToRawArray(&results);
+
+    if(raw != nullptr)
+    {
+
+        uint16_t length =
+            getCorrectedRawLength(
+                &results
+            );
+
+        if(length > 400)
+            length = 400;
+
+        for(
+            uint16_t i=0;
+            i<length;
+            i++
+        )
+        {
+            lastRaw[i] = raw[i];
+        }
+
+        lastRawLength =
+            length;
+
+        delete[] raw;
+    }
+    else
+    {
+        lastRawLength = 0;
+    }
+
+    ledsReceive();
+
+    irrecv.resume();
+}
+
+// ======================================================
+// TRANSMITIR IR
+// ======================================================
+
+void transmitIR()
+{
+
+    if(!signalStored)
+        return;
+
+    if(lastRawLength == 0)
+        return;
+
+    irsend.sendRaw(
+        lastRaw,
+        lastRawLength,
+        38
+    );
+
+    lastTx = millis();
+
+    Serial.println(
+        "[TX] SINAL IR ENVIADO"
+    );
+}
+
+// ======================================================
+// INICIAR TX
+// ======================================================
+
+void startRepeat()
+{
+
+    if(!signalStored)
+    {
+
+        server.send(
+            400,
+            "text/plain",
+            "Nenhum sinal armazenado."
+        );
+
+        return;
+    }
+
+    repeatMode = true;
+
+    txStatus =
+        "TRANSMITINDO";
+
+    Serial.println(
+        "[TX] TRANSMISSAO CONTINUA INICIADA"
+    );
+
+    server.send(
+        200,
+        "text/plain",
+        "OK"
+    );
+}
+
+// ======================================================
+// PARAR TX
+// ======================================================
+
+void stopRepeat()
+{
+
+    repeatMode = false;
+
+    txStatus =
+        "PARADO";
+
+    Serial.println(
+        "[TX] TRANSMISSAO PARADA"
+    );
+
+    server.send(
+        200,
+        "text/plain",
+        "OK"
+    );
+}
+
+// ======================================================
+// WIFI
+// ======================================================
+
+void connectWiFi()
+{
+
+    wifiStatus =
+        "CONECTANDO";
+
+    Serial.println();
+    Serial.println(
+        "Conectando ao Wi-Fi..."
+    );
+
+    WiFi.mode(WIFI_STA);
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    unsigned long start =
+        millis();
+
+    while(
+        WiFi.status() != WL_CONNECTED
+    )
+    {
+
+        digitalWrite(
+            LED_BLUE,
+            HIGH
+        );
+
+        delay(200);
+
+        digitalWrite(
+            LED_BLUE,
+            LOW
+        );
+
+        delay(200);
+
+        Serial.print(
+            "."
+        );
+
+        if(
+            millis() -
+            start >
+            20000
+        )
+        {
+
+            wifiStatus =
+                "DESCONECTADO";
+
+            systemStatus =
+                "ERRO WIFI";
+
+            ledsError();
+
+            Serial.println();
+            Serial.println(
+                "ERRO: Wi-Fi"
+            );
+
+            return;
+        }
+    }
+
+    wifiStatus =
+        "CONECTADO";
+
+    Serial.println();
+    Serial.println(
+        "Wi-Fi conectado."
+    );
+
+    Serial.print(
+        "IP: "
+    );
+
+    Serial.println(
+        WiFi.localIP()
+    );
+}
+
+// ======================================================
+// SETUP
+// ======================================================
+
+void setup()
+{
+
+    Serial.begin(
+        115200
+    );
+
+    delay(1000);
+
+    pinMode(
+        LED_RED,
+        OUTPUT
+    );
+
+    pinMode(
+        LED_BLUE,
+        OUTPUT
+    );
+
+    ledsStartup();
+
+    Serial.println();
+    Serial.println(
+        "================================="
+    );
+
+    Serial.println(
+        "ESP32-S3 IR CONTROL"
+    );
+
+    Serial.println(
+        "INICIALIZANDO SISTEMA"
+    );
+
+    Serial.println(
+        "================================="
+    );
+
+    Serial.print(
+        "IR RX GPIO: "
+    );
+
+    Serial.println(
+        IR_RECEIVER_PIN
+    );
+
+    Serial.print(
+        "IR TX GPIO: "
+    );
+
+    Serial.println(
+        IR_TRANSMITTER_PIN
+    );
+
+    Serial.print(
+        "LED VERMELHO GPIO: "
+    );
+
+    Serial.println(
+        LED_RED
+    );
+
+    Serial.print(
+        "LED AZUL GPIO: "
+    );
+
+    Serial.println(
+        LED_BLUE
+    );
+
+    // IR
+    irrecv.enableIRIn();
+
+    irsend.begin();
+
+    // Wi-Fi
+    connectWiFi();
+
+    if(
+        WiFi.status() ==
+        WL_CONNECTED
+    )
+    {
+
+        systemStatus =
+            "PRONTO";
+
+        ledsNormal();
+
+        server.on(
+            "/",
+            []()
+            {
+                server.send(
+                    200,
+                    "text/html",
+                    PAGE
+                );
+            }
+        );
+
+        server.on(
+            "/api/status",
+            sendStatus
+        );
+
+        server.on(
+            "/api/repeat/start",
+            startRepeat
+        );
+
+        server.on(
+            "/api/repeat/stop",
+            stopRepeat
+        );
+
+        server.begin();
+
+        Serial.println();
+        Serial.println(
+            "SERVIDOR WEB ATIVO"
+        );
+
+        Serial.print(
+            "ABRA: http://"
+        );
+
+        Serial.println(
+            WiFi.localIP()
+        );
+
+        Serial.println();
+        Serial.println(
+            "AGUARDANDO CONTROLE..."
+        );
+
+    }
+}
+
+// ======================================================
+// LOOP
+// ======================================================
+
+void loop()
+{
+
+    server.handleClient();
+
+    // Verifica Wi-Fi
+    if(
+        WiFi.status() !=
+        WL_CONNECTED
+    )
+    {
+
+        wifiStatus =
+            "DESCONECTADO";
+
+        systemStatus =
+            "ERRO WIFI";
+
+        ledsError();
+
+    }
+    else
+    {
+
+        wifiStatus =
+            "CONECTADO";
+
+        if(
+            systemStatus ==
+            "ERRO WIFI"
+        )
+        {
+            systemStatus =
+                "PRONTO";
+
+            ledsNormal();
+        }
+
+    }
+
+    // Receber controle
+    receiveIR();
+
+    // Voltar para estado de espera
+    if(
+        !repeatMode &&
+        millis() - lastReceive > 1200
+    )
+    {
+
+        if(
+            signalStored
+        )
+        {
+            irStatus =
+                "AGUARDANDO";
+        }
+        else
+        {
+            irStatus =
+                "AGUARDANDO";
+        }
+
+    }
+
+    // Transmissão contínua
+    if(
+        repeatMode &&
+        signalStored
+    )
+    {
+
+        if(
+            millis() -
+            lastTx >=
+            300
+        )
+        {
+
+            transmitIR();
+
+            txStatus =
+                "TRANSMITINDO";
+        }
+    }
+
+    delay(2);
+}
