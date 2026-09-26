@@ -1,0 +1,1480 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#include <USBHost.h>
+#include <USBHostMSC.h>
+#include <USBMSCFS.h>
+
+// ============================================================
+// WI-FI
+// ============================================================
+
+const char* WIFI_SSID = "INFORNET_MARIANA";
+const char* WIFI_PASSWORD = "anamaria";
+
+// ============================================================
+// SERVIDOR
+// ============================================================
+
+WebServer server(80);
+
+// ============================================================
+// USB MASS STORAGE
+// ============================================================
+
+USBMSCFSClass USBMSCFS;
+
+bool usbHostStarted = false;
+bool pendriveMontado = false;
+
+String ultimoErro = "";
+
+// ============================================================
+// SEGURANÇA DE CAMINHO
+// ============================================================
+
+bool caminhoValido(String path) {
+
+    if (path.length() == 0) {
+        return false;
+    }
+
+    if (!path.startsWith("/")) {
+        path = "/" + path;
+    }
+
+    if (path.indexOf("..") >= 0) {
+        return false;
+    }
+
+    if (path.indexOf("\\") >= 0) {
+        return false;
+    }
+
+    return true;
+}
+
+// ============================================================
+// TAMANHO HUMANO
+// ============================================================
+
+String tamanhoHumano(uint64_t bytes) {
+
+    if (bytes < 1024)
+        return String(bytes) + " B";
+
+    if (bytes < 1024ULL * 1024)
+        return String((double)bytes / 1024.0, 1) + " KB";
+
+    if (bytes < 1024ULL * 1024 * 1024)
+        return String((double)bytes / (1024.0 * 1024.0), 1) + " MB";
+
+    return String(
+        (double)bytes /
+        (1024.0 * 1024.0 * 1024.0),
+        1
+    ) + " GB";
+}
+
+// ============================================================
+// TENTAR MONTAR PENDRIVE
+// ============================================================
+
+void verificarPendrive() {
+
+    bool conectado = USBHostMSC.mounted();
+
+    if (!conectado) {
+
+        if (pendriveMontado) {
+
+            Serial.println(
+                "[USB] Pendrive removido."
+            );
+
+            if (pendriveMontado) {
+                USBMSCFS.end();
+            }
+
+            pendriveMontado = false;
+        }
+
+        return;
+    }
+
+    if (pendriveMontado) {
+        return;
+    }
+
+    Serial.println();
+    Serial.println(
+        "[USB] Pendrive encontrado."
+    );
+
+    Serial.println(
+        "[USB] Tentando montar FAT..."
+    );
+
+    if (
+        USBMSCFS.begin(
+            "/usb",
+            10,
+            false
+        )
+    ) {
+
+        pendriveMontado = true;
+
+        Serial.println(
+            "[USB] PENDRIVE MONTADO!"
+        );
+
+        Serial.print(
+            "[USB] Tamanho: "
+        );
+
+        Serial.println(
+            tamanhoHumano(
+                USBMSCFS.totalBytes()
+            )
+        );
+
+        Serial.print(
+            "[USB] Usado: "
+        );
+
+        Serial.println(
+            tamanhoHumano(
+                USBMSCFS.usedBytes()
+            )
+        );
+
+    } else {
+
+        ultimoErro =
+            "Falha ao montar FAT";
+
+        Serial.println(
+            "[USB] ERRO: falha ao montar."
+        );
+    }
+}
+
+// ============================================================
+// LISTAR ARQUIVOS
+// ============================================================
+
+void apiArquivos() {
+
+    verificarPendrive();
+
+    if (!pendriveMontado) {
+
+        server.send(
+            503,
+            "application/json",
+            "{\"erro\":\"Pendrive não montado\"}"
+        );
+
+        return;
+    }
+
+    String path =
+        server.hasArg("path")
+        ? server.arg("path")
+        : "/";
+
+    if (!caminhoValido(path)) {
+
+        server.send(
+            400,
+            "application/json",
+            "{\"erro\":\"Caminho inválido\"}"
+        );
+
+        return;
+    }
+
+    File pasta =
+        USBMSCFS.open(path);
+
+    if (!pasta || !pasta.isDirectory()) {
+
+        server.send(
+            404,
+            "application/json",
+            "{\"erro\":\"Pasta não encontrada\"}"
+        );
+
+        return;
+    }
+
+    String json = "[";
+
+    bool primeiro = true;
+
+    File arquivo =
+        pasta.openNextFile();
+
+    while (arquivo) {
+
+        if (!primeiro) {
+            json += ",";
+        }
+
+        primeiro = false;
+
+        json += "{";
+
+        json += "\"nome\":\"";
+        json += arquivo.name();
+        json += "\",";
+
+        json += "\"diretorio\":";
+        json +=
+            arquivo.isDirectory()
+            ? "true"
+            : "false";
+
+        json += ",";
+
+        json += "\"tamanho\":";
+        json += String(
+            (uint64_t)arquivo.size()
+        );
+
+        json += "}";
+
+        arquivo.close();
+
+        arquivo =
+            pasta.openNextFile();
+    }
+
+    pasta.close();
+
+    json += "]";
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ============================================================
+// INFORMAÇÕES DO PENDRIVE
+// ============================================================
+
+void apiInfo() {
+
+    verificarPendrive();
+
+    String json = "{";
+
+    json += "\"conectado\":";
+    json +=
+        USBHostMSC.mounted()
+        ? "true"
+        : "false";
+
+    json += ",";
+
+    json += "\"montado\":";
+    json +=
+        pendriveMontado
+        ? "true"
+        : "false";
+
+    if (pendriveMontado) {
+
+        json += ",";
+
+        json += "\"total\":";
+        json += String(
+            USBMSCFS.totalBytes()
+        );
+
+        json += ",";
+
+        json += "\"usado\":";
+        json += String(
+            USBMSCFS.usedBytes()
+        );
+
+        json += ",";
+
+        json += "\"livre\":";
+        json += String(
+            USBMSCFS.totalBytes() -
+            USBMSCFS.usedBytes()
+        );
+
+        json += ",";
+
+        json += "\"setor\":";
+        json += String(
+            USBMSCFS.sectorSize()
+        );
+
+        json += ",";
+
+        json += "\"setores\":";
+        json += String(
+            USBMSCFS.numSectors()
+        );
+    }
+
+    json += ",";
+
+    json += "\"wifi\":\"";
+    json += WiFi.SSID();
+    json += "\"";
+
+    json += ",";
+
+    json += "\"ip\":\"";
+    json += WiFi.localIP().toString();
+    json += "\"";
+
+    json += ",";
+
+    json += "\"rssi\":";
+    json += String(
+        WiFi.RSSI()
+    );
+
+    json += "}";
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ============================================================
+// DOWNLOAD
+// ============================================================
+
+void baixarArquivo() {
+
+    verificarPendrive();
+
+    if (!pendriveMontado) {
+
+        server.send(
+            503,
+            "text/plain",
+            "Pendrive não montado"
+        );
+
+        return;
+    }
+
+    if (!server.hasArg("path")) {
+
+        server.send(
+            400,
+            "text/plain",
+            "Path ausente"
+        );
+
+        return;
+    }
+
+    String path =
+        server.arg("path");
+
+    if (!caminhoValido(path)) {
+
+        server.send(
+            400,
+            "text/plain",
+            "Path inválido"
+        );
+
+        return;
+    }
+
+    File arquivo =
+        USBMSCFS.open(path, "r");
+
+    if (!arquivo ||
+        arquivo.isDirectory()) {
+
+        server.send(
+            404,
+            "text/plain",
+            "Arquivo não encontrado"
+        );
+
+        return;
+    }
+
+    server.sendHeader(
+        "Content-Disposition",
+        "attachment; filename=\"" +
+        String(arquivo.name()) +
+        "\""
+    );
+
+    server.streamFile(
+        arquivo,
+        "application/octet-stream"
+    );
+
+    arquivo.close();
+}
+
+// ============================================================
+// EXCLUIR
+// ============================================================
+
+void excluirArquivo() {
+
+    verificarPendrive();
+
+    if (!pendriveMontado) {
+
+        server.send(
+            503,
+            "application/json",
+            "{\"erro\":\"Pendrive não montado\"}"
+        );
+
+        return;
+    }
+
+    if (!server.hasArg("path")) {
+
+        server.send(
+            400,
+            "application/json",
+            "{\"erro\":\"Path ausente\"}"
+        );
+
+        return;
+    }
+
+    String path =
+        server.arg("path");
+
+    if (!caminhoValido(path)) {
+
+        server.send(
+            400,
+            "application/json",
+            "{\"erro\":\"Path inválido\"}"
+        );
+
+        return;
+    }
+
+    if (USBMSCFS.remove(path)) {
+
+        server.send(
+            200,
+            "application/json",
+            "{\"ok\":true}"
+        );
+
+    } else {
+
+        server.send(
+            500,
+            "application/json",
+            "{\"erro\":\"Não foi possível excluir\"}"
+        );
+    }
+}
+
+// ============================================================
+// CRIAR PASTA
+// ============================================================
+
+void criarPasta() {
+
+    verificarPendrive();
+
+    if (!pendriveMontado) {
+
+        server.send(
+            503,
+            "application/json",
+            "{\"erro\":\"Pendrive não montado\"}"
+        );
+
+        return;
+    }
+
+    if (!server.hasArg("path")) {
+
+        server.send(
+            400,
+            "application/json",
+            "{\"erro\":\"Path ausente\"}"
+        );
+
+        return;
+    }
+
+    String path =
+        server.arg("path");
+
+    if (!caminhoValido(path)) {
+
+        server.send(
+            400,
+            "application/json",
+            "{\"erro\":\"Path inválido\"}"
+        );
+
+        return;
+    }
+
+    if (USBMSCFS.mkdir(path)) {
+
+        server.send(
+            200,
+            "application/json",
+            "{\"ok\":true}"
+        );
+
+    } else {
+
+        server.send(
+            500,
+            "application/json",
+            "{\"erro\":\"Falha ao criar pasta\"}"
+        );
+    }
+}
+
+// ============================================================
+// UPLOAD
+// ============================================================
+
+File arquivoUpload;
+
+void receberUpload() {
+
+    verificarPendrive();
+
+    if (!pendriveMontado) {
+        return;
+    }
+
+    HTTPUpload& upload =
+        server.upload();
+
+    if (
+        upload.status ==
+        UPLOAD_FILE_START
+    ) {
+
+        String nome =
+            upload.filename;
+
+        nome.replace(
+            "\\",
+            "/"
+        );
+
+        int barra =
+            nome.lastIndexOf('/');
+
+        if (barra >= 0) {
+            nome =
+                nome.substring(
+                    barra + 1
+                );
+        }
+
+        if (
+            nome.length() == 0 ||
+            nome.indexOf("..") >= 0
+        ) {
+
+            Serial.println(
+                "[UPLOAD] Nome inválido."
+            );
+
+            return;
+        }
+
+        String path =
+            "/" + nome;
+
+        Serial.print(
+            "[UPLOAD] Iniciando: "
+        );
+
+        Serial.println(
+            path
+        );
+
+        arquivoUpload =
+            USBMSCFS.open(
+                path,
+                FILE_WRITE
+            );
+
+        if (!arquivoUpload) {
+
+            Serial.println(
+                "[UPLOAD] ERRO ao criar arquivo."
+            );
+
+            return;
+        }
+    }
+
+    else if (
+        upload.status ==
+        UPLOAD_FILE_WRITE
+    ) {
+
+        if (arquivoUpload) {
+
+            arquivoUpload.write(
+                upload.buf,
+                upload.currentSize
+            );
+        }
+    }
+
+    else if (
+        upload.status ==
+        UPLOAD_FILE_END
+    ) {
+
+        if (arquivoUpload) {
+
+            arquivoUpload.close();
+
+            Serial.print(
+                "[UPLOAD] Concluído: "
+            );
+
+            Serial.print(
+                upload.totalSize
+            );
+
+            Serial.println(
+                " bytes"
+            );
+        }
+    }
+
+    else if (
+        upload.status ==
+        UPLOAD_FILE_ABORTED
+    ) {
+
+        if (arquivoUpload) {
+            arquivoUpload.close();
+        }
+
+        Serial.println(
+            "[UPLOAD] Cancelado."
+        );
+    }
+}
+
+// ============================================================
+// PÁGINA WEB
+// ============================================================
+
+void paginaWeb() {
+
+    const char* html = R"HTML(
+
+<!DOCTYPE html>
+
+<html lang="pt-BR">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+ name="viewport"
+ content="width=device-width, initial-scale=1"
+>
+
+<title>ESP32-S3 File Manager</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #080b10;
+    color: white;
+    font-family: Arial, sans-serif;
+}
+
+header {
+    background: #111820;
+    padding: 20px;
+    border-bottom: 1px solid #29333d;
+}
+
+h1 {
+    margin: 0;
+}
+
+.container {
+    max-width: 900px;
+    margin: auto;
+    padding: 20px;
+}
+
+.card {
+    background: #111820;
+    border: 1px solid #29333d;
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.status {
+    padding: 20px;
+    text-align: center;
+    border-radius: 12px;
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.ok {
+    color: #00e676;
+    background: #082116;
+}
+
+.off {
+    color: #ff5252;
+    background: #210b0b;
+}
+
+.progress {
+    height: 12px;
+    background: #252d35;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 10px;
+}
+
+.progress div {
+    height: 100%;
+    width: 0%;
+    background: #1976d2;
+}
+
+.file {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 14px;
+    margin: 8px 0;
+    background: #080b10;
+    border-radius: 10px;
+}
+
+button,
+input[type=file] {
+    padding: 12px;
+    border: 0;
+    border-radius: 9px;
+}
+
+button {
+    background: #1976d2;
+    color: white;
+}
+
+button.delete {
+    background: #c62828;
+}
+
+#files {
+    margin-top: 15px;
+}
+
+.info {
+    color: #9aa6b2;
+    margin: 7px 0;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<header>
+
+<h1>ESP32-S3 File Manager</h1>
+
+</header>
+
+<div class="container">
+
+<div class="card">
+
+<div
+ id="status"
+ class="status off"
+>
+VERIFICANDO USB...
+</div>
+
+<div
+ id="info"
+ class="info"
+>
+---
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>Armazenamento</h2>
+
+<div id="storage">
+Pendrive não conectado
+</div>
+
+<div class="progress">
+<div id="bar"></div>
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>Enviar para o pendrive</h2>
+
+<input
+ id="file"
+ type="file"
+>
+
+<br><br>
+
+<button onclick="upload()">
+ENVIAR ARQUIVO
+</button>
+
+<div
+ id="uploadStatus"
+ class="info"
+>
+---
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>Arquivos</h2>
+
+<button onclick="listar()">
+ATUALIZAR
+</button>
+
+<div id="files">
+---
+</div>
+
+</div>
+
+</div>
+
+<script>
+
+async function status() {
+
+    try {
+
+        const r =
+            await fetch(
+                "/api/info",
+                {
+                    cache: "no-store"
+                }
+            );
+
+        const d =
+            await r.json();
+
+        const s =
+            document.getElementById(
+                "status"
+            );
+
+        if (
+            d.conectado &&
+            d.montado
+        ) {
+
+            s.innerText =
+                "PENDRIVE CONECTADO";
+
+            s.className =
+                "status ok";
+
+            const total =
+                Number(d.total);
+
+            const usado =
+                Number(d.usado);
+
+            const livre =
+                Number(d.livre);
+
+            const porcentagem =
+                total > 0
+                ? (usado / total) * 100
+                : 0;
+
+            document.getElementById(
+                "storage"
+            ).innerText =
+                "Total: " +
+                formatBytes(total) +
+                " | Usado: " +
+                formatBytes(usado) +
+                " | Livre: " +
+                formatBytes(livre);
+
+            document.getElementById(
+                "bar"
+            ).style.width =
+                porcentagem + "%";
+
+            document.getElementById(
+                "info"
+            ).innerText =
+                "IP: " +
+                d.ip +
+                " | Wi-Fi: " +
+                d.ssid +
+                " | Sinal: " +
+                d.rssi +
+                " dBm";
+
+            listar();
+
+        } else {
+
+            s.innerText =
+                "PENDRIVE DESCONECTADO";
+
+            s.className =
+                "status off";
+
+            document.getElementById(
+                "storage"
+            ).innerText =
+                "Nenhum pendrive montado.";
+
+        }
+
+    } catch (e) {
+
+        document.getElementById(
+            "status"
+        ).innerText =
+            "ESP32 OFFLINE";
+
+    }
+}
+
+function formatBytes(bytes) {
+
+    if (bytes < 1024)
+        return bytes + " B";
+
+    if (bytes < 1048576)
+        return (bytes / 1024).toFixed(1) + " KB";
+
+    if (bytes < 1073741824)
+        return (bytes / 1048576).toFixed(1) + " MB";
+
+    return (
+        bytes / 1073741824
+    ).toFixed(1) + " GB";
+}
+
+async function listar() {
+
+    try {
+
+        const r =
+            await fetch(
+                "/api/files?path=/"
+            );
+
+        const lista =
+            await r.json();
+
+        const area =
+            document.getElementById(
+                "files"
+            );
+
+        area.innerHTML = "";
+
+        for (
+            const item of lista
+        ) {
+
+            const div =
+                document.createElement(
+                    "div"
+                );
+
+            div.className =
+                "file";
+
+            const esquerda =
+                document.createElement(
+                    "span"
+                );
+
+            esquerda.innerText =
+                item.diretorio
+                ? "[PASTA] "
+                : "";
+
+            esquerda.innerText +=
+                item.nome;
+
+            if (!item.diretorio) {
+
+                esquerda.innerText +=
+                    " (" +
+                    formatBytes(
+                        item.tamanho
+                    ) +
+                    ")";
+
+            }
+
+            div.appendChild(
+                esquerda
+            );
+
+            if (!item.diretorio) {
+
+                const botoes =
+                    document.createElement(
+                        "span"
+                    );
+
+                const baixar =
+                    document.createElement(
+                        "button"
+                    );
+
+                baixar.innerText =
+                    "Baixar";
+
+                baixar.onclick =
+                    function() {
+
+                        window.location =
+                            "/download?path=" +
+                            encodeURIComponent(
+                                item.nome
+                            );
+                    };
+
+                const excluir =
+                    document.createElement(
+                        "button"
+                    );
+
+                excluir.innerText =
+                    "Excluir";
+
+                excluir.className =
+                    "delete";
+
+                excluir.onclick =
+                    async function() {
+
+                        if (
+                            !confirm(
+                                "Excluir " +
+                                item.nome +
+                                "?"
+                            )
+                        ) {
+                            return;
+                        }
+
+                        await fetch(
+                            "/delete?path=" +
+                            encodeURIComponent(
+                                "/" +
+                                item.nome
+                            ),
+                            {
+                                method:
+                                    "POST"
+                            }
+                        );
+
+                        listar();
+                    };
+
+                botoes.appendChild(
+                    baixar
+                );
+
+                botoes.appendChild(
+                    document.createTextNode(
+                        " "
+                    )
+                );
+
+                botoes.appendChild(
+                    excluir
+                );
+
+                div.appendChild(
+                    botoes
+                );
+            }
+
+            area.appendChild(
+                div
+            );
+        }
+
+    } catch (e) {
+
+        document.getElementById(
+            "files"
+        ).innerText =
+            "Erro ao listar arquivos.";
+
+    }
+}
+
+async function upload() {
+
+    const campo =
+        document.getElementById(
+            "file"
+        );
+
+    if (
+        campo.files.length === 0
+    ) {
+
+        alert(
+            "Selecione um arquivo."
+        );
+
+        return;
+    }
+
+    const form =
+        new FormData();
+
+    form.append(
+        "file",
+        campo.files[0]
+    );
+
+    document.getElementById(
+        "uploadStatus"
+    ).innerText =
+        "Enviando...";
+
+    try {
+
+        const r =
+            await fetch(
+                "/upload",
+                {
+                    method:
+                        "POST",
+                    body:
+                        form
+                }
+            );
+
+        if (r.ok) {
+
+            document.getElementById(
+                "uploadStatus"
+            ).innerText =
+                "Arquivo enviado para o pendrive.";
+
+            campo.value = "";
+
+            listar();
+
+            status();
+
+        } else {
+
+            document.getElementById(
+                "uploadStatus"
+            ).innerText =
+                "Erro no upload.";
+
+        }
+
+    } catch (e) {
+
+        document.getElementById(
+            "uploadStatus"
+        ).innerText =
+            "Falha de comunicação.";
+
+    }
+}
+
+status();
+
+setInterval(
+    status,
+    3000
+);
+
+</script>
+
+</body>
+
+</html>
+
+)HTML";
+
+    server.send(
+        200,
+        "text/html",
+        html
+    );
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+    Serial.begin(115200);
+
+    delay(2000);
+
+    Serial.println();
+    Serial.println(
+        "======================================"
+    );
+    Serial.println(
+        " ESP32-S3 USB PENDRIVE WEB MANAGER"
+    );
+    Serial.println(
+        "======================================"
+    );
+
+    // ========================================================
+    // USB HOST
+    // ========================================================
+
+    USBHost.setCore(0);
+
+    usbHostStarted =
+        USBHost.begin();
+
+    if (usbHostStarted) {
+
+        Serial.println(
+            "[USB] USB Host iniciado."
+        );
+
+    } else {
+
+        Serial.println(
+            "[USB] FALHA ao iniciar Host."
+        );
+    }
+
+    Serial.println(
+        "[USB] D- = GPIO19"
+    );
+
+    Serial.println(
+        "[USB] D+ = GPIO20"
+    );
+
+    // ========================================================
+    // WI-FI
+    // ========================================================
+
+    WiFi.mode(
+        WIFI_STA
+    );
+
+    WiFi.setHostname(
+        "ESP32-S3-PENDRIVE"
+    );
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    Serial.println();
+    Serial.println(
+        "[WIFI] Conectando..."
+    );
+
+    unsigned long inicio =
+        millis();
+
+    while (
+        WiFi.status() != WL_CONNECTED &&
+        millis() - inicio < 20000
+    ) {
+
+        Serial.print(".");
+
+        delay(500);
+    }
+
+    Serial.println();
+
+    if (
+        WiFi.status() ==
+        WL_CONNECTED
+    ) {
+
+        Serial.println(
+            "[WIFI] CONECTADO!"
+        );
+
+        Serial.print(
+            "[WIFI] SSID: "
+        );
+
+        Serial.println(
+            WiFi.SSID()
+        );
+
+        Serial.print(
+            "[WIFI] IP: "
+        );
+
+        Serial.println(
+            WiFi.localIP()
+        );
+
+    } else {
+
+        Serial.println(
+            "[WIFI] FALHA."
+        );
+    }
+
+    // ========================================================
+    // ROTAS
+    // ========================================================
+
+    server.on(
+        "/",
+        HTTP_GET,
+        paginaWeb
+    );
+
+    server.on(
+        "/api/info",
+        HTTP_GET,
+        apiInfo
+    );
+
+    server.on(
+        "/api/files",
+        HTTP_GET,
+        apiArquivos
+    );
+
+    server.on(
+        "/download",
+        HTTP_GET,
+        baixarArquivo
+    );
+
+    server.on(
+        "/delete",
+        HTTP_POST,
+        excluirArquivo
+    );
+
+    server.on(
+        "/mkdir",
+        HTTP_POST,
+        criarPasta
+    );
+
+    server.on(
+        "/upload",
+        HTTP_POST,
+        []() {
+
+            server.send(
+                200,
+                "text/plain",
+                "Upload recebido"
+            );
+
+        },
+        receberUpload
+    );
+
+    server.begin();
+
+    Serial.println();
+    Serial.println(
+        "[WEB] Servidor iniciado."
+    );
+
+    if (
+        WiFi.status() ==
+        WL_CONNECTED
+    ) {
+
+        Serial.print(
+            "[WEB] Acesse: http://"
+        );
+
+        Serial.println(
+            WiFi.localIP()
+        );
+    }
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop() {
+
+    USBHost.task();
+
+    verificarPendrive();
+
+    server.handleClient();
+
+    delay(2);
+}
